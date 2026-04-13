@@ -19,3 +19,34 @@ def format_selection_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton(text=get_msg(lang, "format_audio"), callback_data="dl|audio")])
     buttons.append([InlineKeyboardButton(text=get_msg(lang, "format_thumb"), callback_data="dl|thumbnail")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_forced_sub_keyboard(channels: list) -> InlineKeyboardMarkup:
+    """Majburiy obuna bo'lmagan userga ko'rsatiladigan tugmalar"""
+    buttons = []
+    for ch in channels:
+        chat_id = ch["chat_id"]
+        title = ch["chat_title"] or ch["chat_id"]
+        # @username yoki https://t.me/ formatida bo'lishi kerak
+        if chat_id.startswith("@"):
+            url = f"https://t.me/{chat_id[1:]}"
+        elif chat_id.startswith("-100"):
+            url = f"https://t.me/{chat_id}"  # won't work well, but fallback
+        else:
+            url = f"https://t.me/{chat_id}"
+        buttons.append([InlineKeyboardButton(text=f"➡️ {title}", url=url)])
+    buttons.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_forced_channels_list_keyboard(channels: list) -> InlineKeyboardMarkup:
+    """Admin uchun: majburiy obuna ro'yxatini ko'rsatish va o'chirish tugmalari"""
+    buttons = []
+    for ch in channels:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ {ch['chat_title']} ({ch['chat_type']})",
+                callback_data=f"remove_fc|{ch['id']}"
+            )
+        ])
+    if not buttons:
+        buttons.append([InlineKeyboardButton(text="📭 Ro'yxat bo'sh", callback_data="noop")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

@@ -3,9 +3,9 @@ import asyncio
 import os
 import glob
 from typing import Optional, Tuple
-import imageio_ffmpeg
+import shutil
 
-FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
 
 # Optional: path to a cookies file exported from browser (Netscape format)
 # Export it via "Get cookies.txt LOCALLY" Chrome extension or similar.

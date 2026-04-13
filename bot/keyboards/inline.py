@@ -20,21 +20,18 @@ def format_selection_keyboard(url: str, lang: str) -> InlineKeyboardMarkup:
     buttons.append([InlineKeyboardButton(text=get_msg(lang, "format_thumb"), callback_data="dl|thumbnail")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-def get_forced_sub_keyboard(channels: list) -> InlineKeyboardMarkup:
+def get_forced_sub_keyboard(channels: list, lang: str = 'uz') -> InlineKeyboardMarkup:
     """Majburiy obuna bo'lmagan userga ko'rsatiladigan tugmalar"""
     buttons = []
     for ch in channels:
         chat_id = ch["chat_id"]
         title = ch["chat_title"] or ch["chat_id"]
-        # @username yoki https://t.me/ formatida bo'lishi kerak
         if chat_id.startswith("@"):
             url = f"https://t.me/{chat_id[1:]}"
-        elif chat_id.startswith("-100"):
-            url = f"https://t.me/{chat_id}"  # won't work well, but fallback
         else:
             url = f"https://t.me/{chat_id}"
         buttons.append([InlineKeyboardButton(text=f"➡️ {title}", url=url)])
-    buttons.append([InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")])
+    buttons.append([InlineKeyboardButton(text=get_msg(lang, 'force_sub_check'), callback_data="check_sub")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 def get_forced_channels_list_keyboard(channels: list) -> InlineKeyboardMarkup:
@@ -49,4 +46,11 @@ def get_forced_channels_list_keyboard(channels: list) -> InlineKeyboardMarkup:
         ])
     if not buttons:
         buttons.append([InlineKeyboardButton(text="📭 Ro'yxat bo'sh", callback_data="noop")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_help_reply_keyboard(user_id: int, lang: str = 'uz') -> InlineKeyboardMarkup:
+    """Admin uchun: userga javob berish tugmasi"""
+    buttons = [
+        [InlineKeyboardButton(text=get_msg(lang, 'help_reply_btn'), callback_data=f"reply_user|{user_id}")]
+    ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)

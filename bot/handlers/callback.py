@@ -5,51 +5,74 @@ from aiogram.types import CallbackQuery, FSInputFile
 from bot.services.downloader import DownloaderService
 from bot.database.db import log_download, get_user_lang, set_user_lang, remove_forced_channel, get_forced_channels
 from bot.utils.messages import get_msg
-from bot.config import TEMP_DIR
+from bot.config import TEMP_DIR, ADMIN_IDS
 from bot.utils.validators import detect_platform
 from bot.utils.force_sub import check_subscription
-from bot.keyboards.inline import get_forced_channels_list_keyboard
+from bot.keyboards.inline import get_forced_channels_list_keyboard, get_language_keyboard
+from bot.keyboards.reply import get_main_menu, get_admin_panel_menu
 
 router = Router()
 downloader = DownloaderService(temp_dir=TEMP_DIR)
-from bot.handlers.message import URL_CACHE
+from bot.handlers.message import URL_CACHE, USER_STATE
 
 @router.callback_query(F.data.startswith("lang|"))
-async def handle_lang_selection(callback: CallbackQuery):
+async def handle_lang_selection(callback: CallbackQuery, bot: Bot):
     lang_choice = callback.data.split("|")[1]
     user_id = callback.from_user.id
+    is_admin = user_id in ADMIN_IDS
+    
     await set_user_lang(user_id, lang_choice)
     new_lang = await get_user_lang(user_id)
-    await callback.message.edit_text(get_msg(new_lang, 'success'))
+    
+    # Menuni ham yangilaymiz
+    await callback.message.answer(get_msg(new_lang, 'success'), reply_markup=get_main_menu(is_admin, new_lang))
+    await callback.message.delete()
     await callback.answer()
 
 @router.callback_query(F.data == "check_sub")
 async def handle_check_sub(callback: CallbackQuery, bot: Bot):
-    """Foydalanuvchi obunasini tekshirish"""
     user_id = callback.from_user.id
+    user_lang = await get_user_lang(user_id)
     is_subscribed = await check_subscription(bot, user_id)
+    
     if is_subscribed:
-        user_lang = await get_user_lang(user_id)
-        await callback.message.edit_text("✅ Obuna tasdiqlandi! Endi botdan foydalanishingiz mumkin.")
-        await callback.answer("✅ Obuna tasdiqlandi!", show_alert=True)
+        await callback.message.edit_text(get_msg(user_lang, 'sub_confirmed'))
+        await callback.answer(get_msg(user_lang, 'sub_confirmed'), show_alert=True)
     else:
-        await callback.answer("❌ Hali barcha kanallarga obuna bo'lmagansiz!", show_alert=True)
+        await callback.answer(get_msg(user_lang, 'sub_not_confirmed'), show_alert=True)
 
 @router.callback_query(F.data.startswith("remove_fc|"))
 async def handle_remove_forced_channel(callback: CallbackQuery):
-    """Admin: Majburiy obuna kanalini o'chirish"""
     channel_db_id = int(callback.data.split("|")[1])
     await remove_forced_channel(channel_db_id)
-    # Yangilangan ro'yxatni ko'rsatamiz
+    
     channels = await get_forced_channels()
+    user_lang = await get_user_lang(callback.from_user.id)
+    
     if channels:
         await callback.message.edit_text(
-            "📋 <b>Majburiy obuna ro'yxati</b>\n\nO'chirish uchun ustiga bosing:",
+            get_msg(user_lang, 'channel_list_title'),
             reply_markup=get_forced_channels_list_keyboard(channels)
         )
     else:
-        await callback.message.edit_text("📭 Majburiy obuna ro'yxati bo'sh.")
-    await callback.answer("✅ O'chirildi!")
+        await callback.message.edit_text(get_msg(user_lang, 'channel_list_empty'))
+    await callback.answer("✅")
+
+@router.callback_query(F.data.startswith("reply_user|"))
+async def handle_reply_callback(callback: CallbackQuery):
+    """Admin 'Javob berish' tugmasini bosganda"""
+    target_id = int(callback.data.split("|")[1])
+    admin_id = callback.from_user.id
+    admin_lang = await get_user_lang(admin_id)
+    
+    # Foydalanuvchi ma'lumotlarini olishga urinamiz (faqat ID dan boshqa narsa bo'lsa)
+    try:
+        user_lang = await get_user_lang(target_id)
+        USER_STATE[admin_id] = f"reply_user_mode:{target_id}"
+        await callback.message.answer(get_msg(admin_lang, 'help_reply_prompt', user_info=f"ID: {target_id}"))
+        await callback.answer()
+    except Exception as e:
+        await callback.answer(f"Xatolik: {e}", show_alert=True)
 
 @router.callback_query(F.data == "noop")
 async def handle_noop(callback: CallbackQuery):
@@ -67,7 +90,6 @@ async def handle_format_selection(callback: CallbackQuery, bot: Bot):
         return
         
     platform = detect_platform(url)
-    
     await callback.message.edit_text(get_msg(user_lang, 'downloading'))
     
     try:
@@ -79,7 +101,6 @@ async def handle_format_selection(callback: CallbackQuery, bot: Bot):
             return
 
         file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-        
         await callback.message.edit_text(get_msg(user_lang, 'uploading'))
         
         input_file = FSInputFile(file_path)
@@ -87,7 +108,6 @@ async def handle_format_selection(callback: CallbackQuery, bot: Bot):
         
         try:
             if file_size_mb > 50:
-                # 50MB dan kattalarni document sifatida yuboramiz (2GB gacha)
                 await callback.message.answer_document(input_file, caption=caption_text)
             elif media_type == "audio":
                 await callback.message.answer_audio(input_file, caption=caption_text, title=title)

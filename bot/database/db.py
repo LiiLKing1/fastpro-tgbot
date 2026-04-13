@@ -39,6 +39,11 @@ async def init_db():
         ''')
         await db.commit()
 
+async def user_exists(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)) as cursor:
+            return await cursor.fetchone() is not None
+
 async def add_user(user_id: int, username: str = None, first_name: str = None, last_name: str = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(

@@ -1,10 +1,18 @@
-import yt_dlp
 import asyncio
-import os
 import glob
-from typing import Optional, Tuple
+import html
+import json
+import mimetypes
+import os
+import re
 import shutil
+import subprocess
+from html.parser import HTMLParser
+from typing import Dict, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+import aiohttp
+import yt_dlp
 
 FFMPEG_PATH = shutil.which("ffmpeg") or "ffmpeg"
 DEFAULT_HEADERS = {
@@ -25,10 +33,30 @@ INSTAGRAM_TRACKING_QUERY_KEYS = {
     'utm_source',
     'utm_term',
 }
+INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10, sock_read=30)
 
-# Optional: path to a cookies file exported from browser (Netscape format)
-# Export it via "Get cookies.txt LOCALLY" Chrome extension or similar.
-COOKIES_FILE = "cookies.txt"
+
+class MetaTagParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.meta: Dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() != 'meta':
+            return
+
+        attributes = {}
+        for key, value in attrs:
+            if key and value:
+                attributes[key.lower()] = value
+
+        meta_key = (attributes.get('property') or attributes.get('name') or '').lower()
+        content = attributes.get('content')
+        if meta_key and content and meta_key not in self.meta:
+            self.meta[meta_key] = html.unescape(content)
+
 
 class DownloaderService:
     def __init__(self, temp_dir: str):
@@ -59,11 +87,15 @@ class DownloaderService:
             '',
         ))
 
-    def _base_opts(self, url: Optional[str] = None) -> dict:
+    def _build_headers(self, url: Optional[str] = None) -> dict:
         headers = DEFAULT_HEADERS.copy()
         if url and self._is_instagram_url(url):
             headers['Referer'] = 'https://www.instagram.com/'
+            if INSTAGRAM_COOKIE:
+                headers['Cookie'] = INSTAGRAM_COOKIE
+        return headers
 
+    def _base_opts(self, url: Optional[str] = None) -> dict:
         opts = {
             'quiet': True,
             'no_warnings': True,
@@ -75,9 +107,8 @@ class DownloaderService:
             'extractor_retries': 3,
             'fragment_retries': 3,
             'ffmpeg_location': FFMPEG_PATH,
-            'http_headers': headers,
+            'http_headers': self._build_headers(url),
         }
-        # If cookies file exists, use it (helps with Instagram, TikTok, etc.)
         if os.path.exists(COOKIES_FILE):
             opts['cookiefile'] = COOKIES_FILE
         return opts
@@ -133,6 +164,209 @@ class DownloaderService:
 
         return fallback
 
+    def _instagram_candidate_urls(self, url: str) -> list[str]:
+        parsed = urlsplit(url)
+        base_path = parsed.path.rstrip('/')
+        if not base_path:
+            return [url]
+
+        base_url = f"{parsed.scheme}://{parsed.netloc}{base_path}/"
+        return [
+            f"{base_url}embed/captioned/",
+            f"{base_url}embed/",
+            base_url,
+        ]
+
+    def _decode_json_string(self, value: str) -> str:
+        try:
+            return json.loads(f'"{value}"')
+        except json.JSONDecodeError:
+            return html.unescape(value.replace('\\/', '/'))
+
+    def _extract_json_string(self, page_html: str, key: str) -> Optional[str]:
+        match = re.search(rf'"{key}"\s*:\s*"([^"]+)"', page_html)
+        if match:
+            return self._decode_json_string(match.group(1))
+        return None
+
+    def _extract_html_title(self, page_html: str) -> Optional[str]:
+        match = re.search(r'<title>(.*?)</title>', page_html, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        title = html.unescape(match.group(1)).strip()
+        return ' '.join(title.split()) if title else None
+
+    def _extract_instagram_page_info(self, page_html: str) -> Optional[dict]:
+        parser = MetaTagParser()
+        parser.feed(page_html)
+        meta = parser.meta
+
+        video_url = meta.get('og:video:secure_url') or meta.get('og:video')
+        image_url = meta.get('og:image:secure_url') or meta.get('og:image')
+
+        if not video_url:
+            for key in ('video_url', 'contentUrl'):
+                video_url = self._extract_json_string(page_html, key)
+                if video_url:
+                    break
+
+        if not image_url:
+            for key in ('display_url', 'image_url', 'thumbnail_url', 'thumbnail_src', 'thumbnailUrl'):
+                image_url = self._extract_json_string(page_html, key)
+                if image_url:
+                    break
+
+        title = (
+            meta.get('og:title')
+            or meta.get('twitter:title')
+            or self._extract_json_string(page_html, 'caption')
+            or self._extract_html_title(page_html)
+            or 'Instagram'
+        )
+
+        if not video_url and not image_url:
+            return None
+
+        return {
+            'title': title,
+            'video_url': video_url,
+            'image_url': image_url,
+        }
+
+    async def _fetch_instagram_page_info_with_session(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+    ) -> Optional[dict]:
+        for candidate_url in self._instagram_candidate_urls(url):
+            try:
+                async with session.get(candidate_url, allow_redirects=True) as response:
+                    if response.status >= 400:
+                        continue
+                    page_html = await response.text(errors='ignore')
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                continue
+
+            page_info = self._extract_instagram_page_info(page_html)
+            if page_info:
+                return page_info
+
+        return None
+
+    async def _fetch_instagram_page_info(self, url: str) -> Optional[dict]:
+        async with aiohttp.ClientSession(
+            headers=self._build_headers(url),
+            timeout=REQUEST_TIMEOUT,
+        ) as session:
+            return await self._fetch_instagram_page_info_with_session(session, url)
+
+    def _guess_extension(self, media_url: str, content_type: str, media_type: str) -> str:
+        url_ext = os.path.splitext(urlsplit(media_url).path)[1].lower().lstrip('.')
+        if url_ext:
+            if url_ext == 'jpe':
+                return 'jpg'
+            return url_ext
+
+        mime = content_type.split(';', 1)[0].strip().lower()
+        guessed_ext = mimetypes.guess_extension(mime, strict=False) or ''
+        guessed_ext = guessed_ext.lstrip('.')
+        if guessed_ext == 'jpe':
+            guessed_ext = 'jpg'
+
+        if guessed_ext:
+            return guessed_ext
+
+        return 'mp4' if media_type == 'video' else 'jpg'
+
+    async def _download_remote_file(
+        self,
+        session: aiohttp.ClientSession,
+        media_url: str,
+        prefix: str,
+        media_type: str,
+    ) -> str:
+        async with session.get(media_url, allow_redirects=True) as response:
+            response.raise_for_status()
+            ext = self._guess_extension(media_url, response.headers.get('Content-Type', ''), media_type)
+            file_path = f"{prefix}.{ext}"
+
+            with open(file_path, 'wb') as file_obj:
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    file_obj.write(chunk)
+
+        return file_path
+
+    def _convert_video_to_audio(self, input_path: str, prefix: str) -> str:
+        output_path = f"{prefix}.mp3"
+        if os.path.exists(output_path):
+            os.remove(output_path)
+
+        subprocess.run(
+            [
+                FFMPEG_PATH,
+                '-y',
+                '-loglevel',
+                'error',
+                '-i',
+                input_path,
+                '-vn',
+                '-acodec',
+                'libmp3lame',
+                '-q:a',
+                '2',
+                output_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return output_path
+
+    async def _download_instagram_fallback(
+        self,
+        url: str,
+        format_choice: str,
+        prefix: str,
+    ) -> Tuple[Optional[str], str, str]:
+        async with aiohttp.ClientSession(
+            headers=self._build_headers(url),
+            timeout=REQUEST_TIMEOUT,
+        ) as session:
+            page_info = await self._fetch_instagram_page_info_with_session(session, url)
+            if not page_info:
+                raise RuntimeError('Instagram public fallback failed')
+
+            title = page_info['title']
+
+            if format_choice == 'thumbnail':
+                image_url = page_info.get('image_url')
+                if not image_url:
+                    raise RuntimeError('Instagram thumbnail fallback failed')
+                file_path = await self._download_remote_file(session, image_url, prefix, 'thumbnail')
+                return file_path, title, 'thumbnail'
+
+            if format_choice == 'audio':
+                video_url = page_info.get('video_url')
+                if not video_url:
+                    raise RuntimeError('Instagram audio fallback failed')
+                video_path = await self._download_remote_file(session, video_url, prefix, 'video')
+                try:
+                    audio_path = await asyncio.to_thread(self._convert_video_to_audio, video_path, prefix)
+                finally:
+                    if os.path.exists(video_path):
+                        os.remove(video_path)
+                return audio_path, title, 'audio'
+
+            video_url = page_info.get('video_url')
+            image_url = page_info.get('image_url')
+            media_url = video_url or image_url
+            media_type = 'video' if video_url else 'thumbnail'
+            if not media_url:
+                raise RuntimeError('Instagram media fallback failed')
+
+            file_path = await self._download_remote_file(session, media_url, prefix, media_type)
+            return file_path, title, media_type
+
     async def extract_info(self, url: str) -> dict:
         normalized_url = self._normalize_url(url)
 
@@ -158,13 +392,19 @@ class DownloaderService:
                 raise last_error
             return {}
 
-        return await asyncio.to_thread(run)
+        try:
+            return await asyncio.to_thread(run)
+        except Exception:
+            if self._is_instagram_url(normalized_url):
+                page_info = await self._fetch_instagram_page_info(normalized_url)
+                if page_info:
+                    return {'title': page_info['title']}
+            raise
 
     async def download(self, url: str, format_choice: str, user_id: int) -> Tuple[Optional[str], str, str]:
         normalized_url = self._normalize_url(url)
         prefix = os.path.join(self.temp_dir, f"dl_{user_id}")
 
-        # Clean up leftover files
         for old in glob.glob(f"{prefix}.*"):
             try:
                 os.remove(old)
@@ -189,7 +429,12 @@ class DownloaderService:
 
                 return self._pick_title(info)
 
-        title = await asyncio.to_thread(run)
+        try:
+            title = await asyncio.to_thread(run)
+        except Exception:
+            if not self._is_instagram_url(normalized_url):
+                raise
+            return await self._download_instagram_fallback(normalized_url, format_choice, prefix)
 
         if format_choice == 'audio':
             file_path = self._find_downloaded_file(prefix, ['mp3', 'm4a', 'ogg', 'wav'])

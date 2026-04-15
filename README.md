@@ -52,6 +52,8 @@ A modern, fast, and secure Telegram bot that downloads publicly accessible media
      - `ADMIN_IDS`: Comma-separated list of Telegram User IDs for admin commands.
      - `DATABASE_URL`: SQLite connection string (default provided).
      - `TEMP_DIR`: Directory for temporary downloads.
+     - `COOKIES_FILE`: Optional path to a Netscape-format cookies file for sites like Instagram.
+     - `INSTAGRAM_COOKIE`: Optional raw Instagram `Cookie` header for reels that require an authenticated session.
 
 ### Running the Bot
 ```bash

@@ -19,6 +19,13 @@ URL_CACHE = {}
 # Userlar holati: "help_mode", "broadcast_mode", "reply_user_mode:{target_id}", etc.
 USER_STATE = {}
 
+
+async def show_format_picker(message: Message, user_lang: str, user_id: int, url: str, title: str) -> None:
+    URL_CACHE[user_id] = url
+    reply_text = get_msg(user_lang, 'choose_format', title=title)
+    keyboard = format_selection_keyboard(url, user_lang)
+    await message.edit_text(reply_text, reply_markup=keyboard)
+
 @router.message(F.text)
 async def handle_text_message(message: Message, bot: Bot) -> None:
     text = message.text.strip()
@@ -222,20 +229,21 @@ async def handle_text_message(message: Message, bot: Bot) -> None:
     try:
         info = await downloader.extract_info(text)
         if not info:
-            await status_msg.edit_text(get_msg(user_lang, 'error_private'))
+            if platform == 'Instagram':
+                await show_format_picker(status_msg, user_lang, user_id, text, platform)
+            else:
+                await status_msg.edit_text(get_msg(user_lang, 'error_private'))
             return
             
-        title = info.get("title", "Unknown Title")
-        URL_CACHE[user_id] = text
-        
-        reply_text = get_msg(user_lang, 'choose_format', title=title)
-        keyboard = format_selection_keyboard(text, user_lang)
-        
-        await status_msg.edit_text(reply_text, reply_markup=keyboard)
+        title = info.get("title") or platform
+        await show_format_picker(status_msg, user_lang, user_id, text, title)
         
     except Exception as e:
-        logging.error(f"Error extracting info: {e}")
+        logging.error(f"Error extracting info for {platform}: {e}")
         try:
-            await status_msg.edit_text(get_msg(user_lang, 'error_private'))
+            if platform == 'Instagram':
+                await show_format_picker(status_msg, user_lang, user_id, text, platform)
+            else:
+                await status_msg.edit_text(get_msg(user_lang, 'error_private'))
         except aiogram.exceptions.TelegramBadRequest:
             pass
